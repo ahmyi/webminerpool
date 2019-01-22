@@ -1,23 +1,20 @@
-#!/usr/bin/env bash
-
-set -o errexit
-set -o pipefail
-set -o nounset
+#!/bin/bash
 
 # Check if $DOMAIN is set
-if [ -z "$DOMAIN" ]; then
-  echo -e "You did not set \$DOMAIN variable at run time. No certificate will be registered.\n"
-  echo -e "If you want to define it on command line here is an example:\n"
-  echo -e "docker run -d -p 80:80 -p 443:443 -e DOMAIN=example.com\n"
+if [ -z $DOMAIN ]; then
+	echo -e "You need to set \$DOMAIN variable at run time\n"
+	echo -e "For example: docker run -d -p 80:80 -p 443:443 -e DOMAIN=example.com\n"
+	exit 1
 else
-  if [[ ! -f "/root/.acme.sh/${DOMAIN}/${DOMAIN}.cer" ]] || ! openssl x509 -checkend 0 -in "/root/.acme.sh/${DOMAIN}/${DOMAIN}.cer"; then
-    # Generate SSL cert
-    /root/.acme.sh/acme.sh --issue --standalone -d "${DOMAIN}" -d "www.${DOMAIN}"
-    # Generate pfx
-    openssl pkcs12 -export -out /webminerpool/certificate.pfx -inkey "/root/.acme.sh/${DOMAIN}/${DOMAIN}.key" -in "/root/.acme.sh/${DOMAIN}/${DOMAIN}.cer" -certfile "/root/.acme.sh/${DOMAIN}/fullchain.cer" -passin pass:miner -passout pass:miner
-  fi
-fi
 
-# Start server
-pushd /webminerpool
-exec /usr/bin/mono server.exe
+	set -ex git clone https://github.com/Neilpang/acme.sh.git /root/acme.sh \
+  && cd /root/acme.sh \
+  && git checkout 2.7.8 \
+  && /root/acme.sh/acme.sh --install \
+	&& /root/.acme.sh/acme.sh --issue --standalone -d ${DOMAIN} -d www.${DOMAIN} \ # Generate SSL cert 
+	&& openssl pkcs12 -export -out /opt/pool/certificate.pfx -inkey /root/.acme.sh/${DOMAIN}/${DOMAIN}.key -in /root/.acme.sh/${DOMAIN}/${DOMAIN}.cer -certfile /root/.acme.sh/${DOMAIN}/fullchain.cer -passin pass:miner -passout pass:miner
+
+	# Start server
+	set -ex && pushd /opt/pool
+	set -ex && exec /usr/bin/mono server.exe
+fi

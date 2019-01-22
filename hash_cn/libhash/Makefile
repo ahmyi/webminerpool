@@ -1,7 +1,7 @@
-TARGET = libhash.so
+TARGET = prog
 LIBS = -lm
-CC = gcc -O3 -shared -pthread -fPIC
-CFLAGS = -g -Wall -std=gnu99 -maes
+CC = arm-linux-androideabi-gcc -O3 -shared -fPIC -pthread
+#CFLAGS = -g -Wall -std=gnu99 -maes
 
 .PHONY: default all clean
 
@@ -16,7 +16,7 @@ HEADERS = $(wildcard *.h)
 .PRECIOUS: $(TARGET) $(OBJECTS)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) -Wall $(LIBS) -o $(TARGET)
+	$(CC) $(OBJECTS) -Wall $(LIBS) -o libhash.so
 
 clean:
 	-rm -f *.o

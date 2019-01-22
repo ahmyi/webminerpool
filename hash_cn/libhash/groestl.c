@@ -8,41 +8,9 @@
  *
  */
 
-#include <stdint.h>
+#include <stddef.h>
+#include "groestl.h"
 #include "groestl_tables.h"
-
-typedef unsigned char BitSequence;
-typedef unsigned long long DataLength;
-typedef enum {SUCCESS = 0, FAIL = 1, BAD_HASHLEN = 2} HashReturn;
-
-/* some sizes (number of bytes) */
-#define ROWS 8
-#define LENGTHFIELDLEN ROWS
-#define COLS512 8
-
-#define SIZE512 (ROWS*COLS512)
-
-#define ROUNDS512 10
-#define HASH_BIT_LEN 256
-
-#define ROTL32(v, n) ((((v)<<(n))|((v)>>(32-(n))))&li_32(ffffffff))
-
-#define li_32(h) 0x##h##u
-#define EXT_BYTE(var,n) ((uint8_t)((uint32_t)(var) >> (8*n)))
-#define u32BIG(a)				\
-  ((ROTL32(a,8) & li_32(00FF00FF)) |		\
-   (ROTL32(a,24) & li_32(FF00FF00)))
-
-/* NIST API begin */
-typedef struct {
-  uint32_t chaining[SIZE512/sizeof(uint32_t)];            /* actual state */
-  uint32_t block_counter1,
-  block_counter2;         /* message block counter(s) */
-  BitSequence buffer[SIZE512];      /* data buffer */
-  int buf_ptr;              /* data buffer pointer */
-  int bits_in_last_byte;    /* no. of message bits in last byte of
-			       data buffer */
-} groestlHashState;
 
 #define P_TYPE 0
 #define Q_TYPE 1
@@ -157,8 +125,8 @@ static void F512(uint32_t *h, const uint32_t *m) {
   uint32_t z[2*COLS512];
 
   for (i = 0; i < 2*COLS512; i++) {
-	z[i] = m[i];
-	Ptmp[i] = h[i]^m[i];
+    z[i] = m[i];
+    Ptmp[i] = h[i]^m[i];
   }
 
   /* compute Q(m) */
@@ -187,29 +155,29 @@ static void F512(uint32_t *h, const uint32_t *m) {
 
   /* compute P(h+m) + Q(m) + h */
   for (i = 0; i < 2*COLS512; i++) {
-	h[i] ^= Ptmp[i]^Qtmp[i];
+    h[i] ^= Ptmp[i]^Qtmp[i];
   }
 }
 
 
 /* digest up to msglen bytes of input (full blocks only) */
-static void Transform(groestlHashState *ctx,
+static void Transform(hashState *ctx, 
 	       const uint8_t *input, 
 	       int msglen) {
 
   /* digest message, one block at a time */
   for (; msglen >= SIZE512; 
-	   msglen -= SIZE512, input += SIZE512) {
-	F512(ctx->chaining,(uint32_t*)input);
+       msglen -= SIZE512, input += SIZE512) {
+    F512(ctx->chaining,(uint32_t*)input);
 
-	/* increment block counter */
-	ctx->block_counter1++;
-	if (ctx->block_counter1 == 0) ctx->block_counter2++;
+    /* increment block counter */
+    ctx->block_counter1++;
+    if (ctx->block_counter1 == 0) ctx->block_counter2++;
   }
 }
 
 /* given state h, do h <- P(h)+h */
-static void OutputTransformation(groestlHashState *ctx) {
+static void OutputTransformation(hashState *ctx) {
   int j;
   uint32_t temp[2*COLS512];
   uint32_t y[2*COLS512];
@@ -236,11 +204,10 @@ static void OutputTransformation(groestlHashState *ctx) {
 }
 
 /* initialise context */
-static void Init(groestlHashState* ctx) {
-  int i = 0;
+static void Init(hashState* ctx) {
   /* allocate memory for state and data buffer */
 
-  for(;i<(SIZE512/sizeof(uint32_t));i++)
+  for(size_t i = 0; i < (SIZE512/sizeof(uint32_t)); i++)
   {
 	ctx->chaining[i] = 0;
   }
@@ -256,7 +223,7 @@ static void Init(groestlHashState* ctx) {
 }
 
 /* update state with databitlen bits of input */
-static void Update(groestlHashState* ctx,
+static void Update(hashState* ctx,
 		  const BitSequence* input,
 		  DataLength databitlen) {
   int index = 0;
@@ -264,23 +231,23 @@ static void Update(groestlHashState* ctx,
   int rem = (int)(databitlen%8);
 
   /* if the buffer contains data that has not yet been digested, first
-	 add data to buffer until full */
+     add data to buffer until full */
   if (ctx->buf_ptr) {
-	while (ctx->buf_ptr < SIZE512 && index < msglen) {
-	  ctx->buffer[(int)ctx->buf_ptr++] = input[index++];
-	}
-	if (ctx->buf_ptr < SIZE512) {
-	  /* buffer still not full, return */
-	  if (rem) {
+    while (ctx->buf_ptr < SIZE512 && index < msglen) {
+      ctx->buffer[(int)ctx->buf_ptr++] = input[index++];
+    }
+    if (ctx->buf_ptr < SIZE512) {
+      /* buffer still not full, return */
+      if (rem) {
 	ctx->bits_in_last_byte = rem;
 	ctx->buffer[(int)ctx->buf_ptr++] = input[index];
-	  }
-	  return;
-	}
+      }
+      return;
+    }
 
-	/* digest buffer */
-	ctx->buf_ptr = 0;
-	Transform(ctx, ctx->buffer, SIZE512);
+    /* digest buffer */
+    ctx->buf_ptr = 0;
+    Transform(ctx, ctx->buffer, SIZE512);
   }
 
   /* digest bulk of message */
@@ -289,15 +256,15 @@ static void Update(groestlHashState* ctx,
 
   /* store remaining data in buffer */
   while (index < msglen) {
-	ctx->buffer[(int)ctx->buf_ptr++] = input[index++];
+    ctx->buffer[(int)ctx->buf_ptr++] = input[index++];
   }
 
   /* if non-integral number of bytes have been supplied, store
-	 remaining bits in last byte, together with information about
-	 number of bits */
+     remaining bits in last byte, together with information about
+     number of bits */
   if (rem) {
-	ctx->bits_in_last_byte = rem;
-	ctx->buffer[(int)ctx->buf_ptr++] = input[index];
+    ctx->bits_in_last_byte = rem;
+    ctx->buffer[(int)ctx->buf_ptr++] = input[index];
   }
 }
 
@@ -305,31 +272,31 @@ static void Update(groestlHashState* ctx,
 
 /* finalise: process remaining data (including padding), perform
    output transformation, and write hash result to 'output' */
-static void Final(groestlHashState* ctx,
+static void Final(hashState* ctx,
 		 BitSequence* output) {
   int i, j = 0, hashbytelen = HASH_BIT_LEN/8;
   uint8_t *s = (BitSequence*)ctx->chaining;
 
   /* pad with '1'-bit and first few '0'-bits */
   if (BILB) {
-	ctx->buffer[(int)ctx->buf_ptr-1] &= ((1<<BILB)-1)<<(8-BILB);
-	ctx->buffer[(int)ctx->buf_ptr-1] ^= 0x1<<(7-BILB);
-	BILB = 0;
+    ctx->buffer[(int)ctx->buf_ptr-1] &= ((1<<BILB)-1)<<(8-BILB);
+    ctx->buffer[(int)ctx->buf_ptr-1] ^= 0x1<<(7-BILB);
+    BILB = 0;
   }
   else ctx->buffer[(int)ctx->buf_ptr++] = 0x80;
 
   /* pad with '0'-bits */
   if (ctx->buf_ptr > SIZE512-LENGTHFIELDLEN) {
-	/* padding requires two blocks */
-	while (ctx->buf_ptr < SIZE512) {
-	  ctx->buffer[(int)ctx->buf_ptr++] = 0;
-	}
-	/* digest first padding block */
-	Transform(ctx, ctx->buffer, SIZE512);
-	ctx->buf_ptr = 0;
+    /* padding requires two blocks */
+    while (ctx->buf_ptr < SIZE512) {
+      ctx->buffer[(int)ctx->buf_ptr++] = 0;
+    }
+    /* digest first padding block */
+    Transform(ctx, ctx->buffer, SIZE512);
+    ctx->buf_ptr = 0;
   }
   while (ctx->buf_ptr < SIZE512-LENGTHFIELDLEN) {
-	ctx->buffer[(int)ctx->buf_ptr++] = 0;
+    ctx->buffer[(int)ctx->buf_ptr++] = 0;
   }
 
   /* length padding */
@@ -338,12 +305,12 @@ static void Final(groestlHashState* ctx,
   ctx->buf_ptr = SIZE512;
 
   while (ctx->buf_ptr > SIZE512-(int)sizeof(uint32_t)) {
-	ctx->buffer[(int)--ctx->buf_ptr] = (uint8_t)ctx->block_counter1;
-	ctx->block_counter1 >>= 8;
+    ctx->buffer[(int)--ctx->buf_ptr] = (uint8_t)ctx->block_counter1;
+    ctx->block_counter1 >>= 8;
   }
   while (ctx->buf_ptr > SIZE512-LENGTHFIELDLEN) {
-	ctx->buffer[(int)--ctx->buf_ptr] = (uint8_t)ctx->block_counter2;
-	ctx->block_counter2 >>= 8;
+    ctx->buffer[(int)--ctx->buf_ptr] = (uint8_t)ctx->block_counter2;
+    ctx->block_counter2 >>= 8;
   }
   /* digest final padding block */
   Transform(ctx, ctx->buffer, SIZE512); 
@@ -352,15 +319,15 @@ static void Final(groestlHashState* ctx,
 
   /* store hash result in output */
   for (i = SIZE512-hashbytelen; i < SIZE512; i++,j++) {
-	output[j] = s[i];
+    output[j] = s[i];
   }
 
   /* zeroise relevant variables and deallocate memory */
   for (i = 0; i < COLS512; i++) {
-	ctx->chaining[i] = 0;
+    ctx->chaining[i] = 0;
   }
   for (i = 0; i < SIZE512; i++) {
-	ctx->buffer[i] = 0;
+    ctx->buffer[i] = 0;
   }
 }
 
@@ -369,10 +336,10 @@ void groestl(const BitSequence* data,
 		DataLength databitlen,
 		BitSequence* hashval) {
 
-  groestlHashState context;
+  hashState context;
 
   /* initialise */
-	Init(&context);
+    Init(&context);
 
 
   /* process message */

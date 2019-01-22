@@ -1,41 +1,46 @@
-FROM mono:5.16 AS webminerpool-build
+FROM mono:5.12.0.226 AS build
 
-ARG DONATION_LEVEL=0.03
+ARG DONATION_LEVEL=0.05
 
 COPY server /server
-COPY hash_cn /hash_cn
+COPY hash_cn/libhash /libhash
 
-RUN sed -ri "s/^(.*DonationLevel = )[0-9]\.[0-9]{2}/\1${DONATION_LEVEL}/" /server/Server/DevDonation.cs && \
+ RUN set -ex && sed -ri "s/^(.*DonationLevel = )[0-9]\.[0-9]{2}/\1${DONATION_LEVEL}/" /server/Server/DevDonation.cs && \
 	apt-get -qq update && \
 	apt-get -qq install build-essential && \
-	rm -rf /var/lib/apt/lists/* && \
-	cd /hash_cn/libhash && \
+	cd /libhash && \
 	make && \
 	cd /server && \
 	msbuild Server.sln /p:Configuration=Release_Server /p:Platform="any CPU"
 
-FROM mono:5.16
+FROM mono:5.12.0.226
 
-RUN mkdir /webminerpool
+ARG POOL_ROOT=/opt/pool
+RUN mkdir -p $POOL_ROOT
 
-# Install acme.sh
-RUN apt-get -qq update && \
-	apt-get install -qq \
-		coreutils \
-		cron \
-		curl \
-		git \
-		openssl \
-		socat && \
-	rm -rf /var/lib/apt/lists/* && \
-	git clone https://github.com/Neilpang/acme.sh.git /root/acme.sh && \
-	cd /root/acme.sh && \
-	git checkout 2.7.9 && \
-	/root/acme.sh/acme.sh --install --home /root/.acme.sh
-COPY entrypoint.sh /entrypoint.sh
-COPY --from=webminerpool-build /server/Server/bin/Release_Server/server.exe /webminerpool
-COPY --from=webminerpool-build /server/Server/bin/Release_Server/pools.json /webminerpool
-COPY --from=webminerpool-build /hash_cn/libhash/libhash.so /webminerpool
-RUN chmod +x /entrypoint.sh
+VOLUME "/opt"
+WORKDIR  $POOL_ROOT
 
-ENTRYPOINT ["./entrypoint.sh"]
+RUN set -ex \
+ && apt-get -qq update \
+ && apt-get install -qq cron openssl curl coreutils socat git
+
+
+#COPY entrypoint.sh /entrypoint.sh
+COPY --from=build /server/Server/bin/Release_Server/server.exe $POOL_ROOT
+COPY --from=build /server/Server/bin/Release_Server/pools.json $POOL_ROOT
+COPY --from=build /libhash/libhash.so $POOL_ROOT
+
+
+
+#COPY SDK/miner_raw /var/www/html
+
+
+#COPY entrypoint.sh /entrypoint.sh
+#RUN chmod +x /entrypoint.sh
+
+expose 18181
+
+ENTRYPOINT ["/usr/bin/mono"]
+
+CMD ["server.exe"]
