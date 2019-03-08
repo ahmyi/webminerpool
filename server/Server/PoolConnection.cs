@@ -1,6 +1,6 @@
 ﻿// The MIT License (MIT)
 
-// Copyright (c) 2018 - the webminerpool developer
+// Copyright (c) 2018-2019 - the webminerpool developer
 
 // Permission is hereby granted, free of charge, to any person obtaining a copy of
 // this software and associated documentation files (the "Software"), to deal in
@@ -32,386 +32,416 @@ using JsonData = System.Collections.Generic.Dictionary<string, object>;
 
 using Fleck;
 
-namespace Server {
+namespace Server
+{
 
-	public class PoolConnection {
-		public TcpClient TcpClient;
+    public class PoolConnection
+    {
+        public TcpClient TcpClient;
 
-		public byte[] ReceiveBuffer;
+        public byte[] ReceiveBuffer;
 
-		public string Login;
-		public string Password;
-		public int Port;
-		public string Url;
-		public bool Closed;
+        public string Login;
+        public string Password;
+        public int Port;
+        public string Url;
+        public bool Closed;
 
-		public string PoolId;
-		public string Credentials;
+        public string PoolId;
+        public string Credentials;
 
-		public long Hashes = 0;
+        public long Hashes = 0;
 
-		public Client LastSender;
-		public JsonData LastJob;
-		public DateTime LastInteraction = DateTime.Now;
-		public CcHashset<string> LastSolved;
+        public Client LastSender;
+        public JsonData LastJob;
+        public DateTime LastInteraction = DateTime.Now;
+        public CcHashset<string> LastSolved;
 
-		public string DefaultAlgorithm = "cn";
-		public int DefaultVariant = -1;
+        public string DefaultAlgorithm = "cn";
 
+        public CcHashset<Client> WebClients = new CcHashset<Client>();
 
-		public CcHashset<Client> WebClients = new CcHashset<Client> ();
+        public void Send(Client client, string msg)
+        {
+            try
+            {
+                Byte[] bytesSent = Encoding.ASCII.GetBytes(msg);
+                TcpClient.GetStream().BeginWrite(bytesSent, 0, bytesSent.Length, SendCallback, null);
+                this.LastSender = client;
+            }
+            catch { }
+        }
 
-		public void Send (Client client, string msg) {
-			try {
-				Byte[] bytesSent = Encoding.ASCII.GetBytes (msg);
-				TcpClient.GetStream ().BeginWrite (bytesSent, 0, bytesSent.Length, SendCallback, null);
-				this.LastSender = client;
-			} catch { }
-		}
+        private void SendCallback(IAsyncResult result)
+        {
+            if (!TcpClient.Connected) return;
 
-		private void SendCallback (IAsyncResult result) {
-			if (!TcpClient.Connected) return;
+            try
+            {
+                NetworkStream networkStream = TcpClient.GetStream();
+                networkStream.EndWrite(result);
+            }
+            catch { }
+        }
 
-			try {
-				NetworkStream networkStream = TcpClient.GetStream ();
-				networkStream.EndWrite (result);
-			} catch { }
-		}
+    }
+    public class PoolConnectionFactory
+    {
+        public delegate void ReceiveJobDelegate(Client client, JsonData json, CcHashset<string> hashset);
+        public delegate void ReceiveErrorDelegate(Client client, JsonData json);
+        public delegate void DisconnectedDelegate(Client client, string reason);
 
-	}
-	public class PoolConnectionFactory {
-		public delegate void ReceiveJobDelegate (Client client, JsonData json, CcHashset<string> hashset);
-		public delegate void ReceiveErrorDelegate (Client client, JsonData json);
-		public delegate void DisconnectedDelegate (Client client, string reason);
+        private static ReceiveErrorDelegate ReceiveError;
+        private static ReceiveJobDelegate ReceiveJob;
+        private static DisconnectedDelegate Disconnect;
 
-		private static ReceiveErrorDelegate ReceiveError;
-		private static ReceiveJobDelegate ReceiveJob;
-		private static DisconnectedDelegate Disconnect;
+        public static CcDictionary<string, PoolConnection> Connections = new CcDictionary<string, PoolConnection>();
 
-		public static CcDictionary<string, PoolConnection> Connections = new CcDictionary<string, PoolConnection> ();
+        private static bool VerifyJob(JsonData data)
+        {
+            if (data == null) return false;
 
-		private static bool VerifyJob (JsonData data) {
-			if (data == null) return false;
+            if (!data.ContainsKey("job_id")) return false;
+            if (!data.ContainsKey("blob")) return false;
+            if (!data.ContainsKey("target")) return false;
 
-			if (!data.ContainsKey ("job_id")) return false;
-			if (!data.ContainsKey ("blob")) return false;
-			if (!data.ContainsKey ("target")) return false;
+            string blob = data["blob"].GetString();
+            string target = data["target"].GetString();
 
-			string blob = data["blob"].GetString ();
-			string target = data["target"].GetString ();
+            if (blob.Length < 152 || blob.Length > 220) return false;
+            if (target.Length != 8) return false;
 
-            if (blob.Length < 152 || blob.Length > 180) return false;
-			if (target.Length != 8) return false;
+            if (!Regex.IsMatch(blob, MainClass.RegexIsHex)) return false;
+            if (!Regex.IsMatch(target, MainClass.RegexIsHex)) return false;
 
-			if (!Regex.IsMatch (blob, MainClass.RegexIsHex)) return false;
-			if (!Regex.IsMatch (target, MainClass.RegexIsHex)) return false;
+            return true;
+        }
 
-			return true;
-		}
+        private static void ReceiveCallback(IAsyncResult result)
+        {
+            PoolConnection mypc = result.AsyncState as PoolConnection;
+            TcpClient client = mypc.TcpClient;
 
-		private static void ReceiveCallback (IAsyncResult result) {
+            if (mypc.Closed || !client.Connected) return;
 
-			PoolConnection mypc = result.AsyncState as PoolConnection;
-			TcpClient client = mypc.TcpClient;
+            NetworkStream networkStream;
 
-			if (mypc.Closed || !client.Connected) return;
+            try { networkStream = client.GetStream(); } catch { return; }
 
-			NetworkStream networkStream;
+            int bytesread = 0;
 
-			try { networkStream = client.GetStream (); } catch { return; }
+            try { bytesread = networkStream.EndRead(result); } catch { return; }
 
-			int bytesread = 0;
+            string json = string.Empty;
 
-			try { bytesread = networkStream.EndRead (result); } catch { return; }
+            try
+            {
+                if (bytesread == 0) // disconnected
+                {
+                    // slow that down a bit to avoid negative feedback loop
 
-			string json = string.Empty;
+                    Task.Run(async delegate
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(4));
 
-			try {
-				if (bytesread == 0) // disconnected
-				{
+                        List<Client> cllist = new List<Client>(mypc.WebClients.Values);
+                        foreach (Client ev in cllist) Disconnect(ev, "lost pool connection.");
+                    });
 
-					// slow that down a bit to avoid negative feedback loop
+                    return;
+                }
 
-					Task.Run (async delegate {
-						await Task.Delay (TimeSpan.FromSeconds (4));
+                json = Encoding.ASCII.GetString(mypc.ReceiveBuffer, 0, bytesread);
 
-						List<Client> cllist = new List<Client> (mypc.WebClients.Values);
-						foreach (Client ev in cllist) Disconnect (ev, "lost pool connection.");
-					});
+                networkStream.BeginRead(mypc.ReceiveBuffer, 0, mypc.ReceiveBuffer.Length, new AsyncCallback(ReceiveCallback), mypc);
+            }
+            catch { return; }
 
-					return;
-				}
+            if (bytesread == 0 || string.IsNullOrEmpty(json)) return; //?!
 
-				json = Encoding.ASCII.GetString (mypc.ReceiveBuffer, 0, bytesread);
+            var msg = json.FromJson<JsonData>();
+            if (msg == null) return;
 
-				networkStream.BeginRead (mypc.ReceiveBuffer, 0, mypc.ReceiveBuffer.Length, new AsyncCallback (ReceiveCallback), mypc);
+            if (string.IsNullOrEmpty(mypc.PoolId))
+            {
 
-			} catch { return; }
+                // this "protocol" is strange
+                if (!msg.ContainsKey("result"))
+                {
 
-			if (bytesread == 0 || string.IsNullOrEmpty (json)) return; //?!
+                    string additionalInfo = "none";
 
-			var msg = json.FromJson<JsonData> ();
-			if (msg == null) return;
+                    // try to get the error
+                    if (msg.ContainsKey("error"))
+                    {
+                        msg = msg["error"] as JsonData;
 
-			if (string.IsNullOrEmpty (mypc.PoolId)) {
+                        if (msg != null && msg.ContainsKey("message"))
+                            additionalInfo = msg["message"].GetString();
+                    }
 
-				// this "protocol" is strange
-				if (!msg.ContainsKey ("result")) {
+                    List<Client> cllist = new List<Client>(mypc.WebClients.Values);
+                    foreach (Client ev in cllist)
+                        Disconnect(ev, "can not connect. additional information: " + additionalInfo);
 
-					string additionalInfo = "none";
+                    return;
+                }
 
-					// try to get the error
-					if (msg.ContainsKey ("error")) {
-						msg = msg["error"] as JsonData;
+                msg = msg["result"] as JsonData;
 
-						if (msg != null && msg.ContainsKey ("message"))
-							additionalInfo = msg["message"].GetString ();
-					}
+                if (msg == null)
+                    return;
+                if (!msg.ContainsKey("id"))
+                    return;
+                if (!msg.ContainsKey("job"))
+                    return;
 
-					List<Client> cllist = new List<Client> (mypc.WebClients.Values);
-					foreach (Client ev in cllist)
-						Disconnect (ev, "can not connect. additional information: " + additionalInfo);
+                mypc.PoolId = msg["id"].GetString();
 
-					return;
-				}
+                var lastjob = msg["job"] as JsonData;
 
-				msg = msg["result"] as JsonData;
+                if (!VerifyJob(lastjob))
+                {
+                    CConsole.ColorWarning(() =>
+                    Console.WriteLine("Failed to verify job: {0}", json));
+                    return;
+                }
 
-				if (msg == null)
-					return;
-				if (!msg.ContainsKey ("id"))
-					return;
-				if (!msg.ContainsKey ("job"))
-					return;
-
-				mypc.PoolId = msg["id"].GetString ();
-
-				var lastjob = msg["job"] as JsonData;
-
-				if (!VerifyJob (lastjob)) {
-					CConsole.ColorWarning(() =>
-					Console.WriteLine ("Failed to verify job: {0}", json));
-					return;
-				}
-
-				// extended stratum 
-				if(!lastjob.ContainsKey("variant")) lastjob.Add("variant",mypc.DefaultVariant);
-				if(!lastjob.ContainsKey("algo")) lastjob.Add("algo",mypc.DefaultAlgorithm);            
-				AlgorithmHelper.NormalizeAlgorithmAndVariant(lastjob);
-                            
-				mypc.LastJob = lastjob;
-				mypc.LastInteraction = DateTime.Now;
-
-				mypc.LastSolved = new CcHashset<string> ();
-
-				List<Client> cllist2 = new List<Client> (mypc.WebClients.Values);
-				foreach (Client ev in cllist2) {
-					ReceiveJob (ev, mypc.LastJob, mypc.LastSolved);
-				}
-
-			} else if (msg.ContainsKey ("method") && msg["method"].GetString () == "job") {
-				if (!msg.ContainsKey ("params"))
-					return;
-
-				var lastjob = msg["params"] as JsonData;
-
-				if (!VerifyJob (lastjob)) {
-					CConsole.ColorWarning(() =>
-					Console.WriteLine ("Failed to verify job: {0}", json));
-					return;
-				}
-                            
-				// extended stratum 
-                if (!lastjob.ContainsKey("variant")) lastjob.Add("variant", mypc.DefaultVariant);
+                // extended stratum 
                 if (!lastjob.ContainsKey("algo")) lastjob.Add("algo", mypc.DefaultAlgorithm);
-				AlgorithmHelper.NormalizeAlgorithmAndVariant(lastjob);
+                if (!AlgorithmHelper.NormalizeAlgorithmAndVariant(lastjob))
+                {
+                    CConsole.ColorWarning(() => Console.WriteLine("Do not understand algorithm/variant!"));
+                    return;
+                }
 
-				mypc.LastJob = lastjob;
-				mypc.LastInteraction = DateTime.Now;
-				mypc.LastSolved = new CcHashset<string> ();
+                mypc.LastJob = lastjob;
+                mypc.LastInteraction = DateTime.Now;
 
-				List<Client> cllist2 = new List<Client> (mypc.WebClients.Values);
+                mypc.LastSolved = new CcHashset<string>();
 
-				Console.WriteLine ("Sending job to {0} client(s)!", cllist2.Count);
+                List<Client> cllist2 = new List<Client>(mypc.WebClients.Values);
+                foreach (Client ev in cllist2)
+                {
+                    ReceiveJob(ev, mypc.LastJob, mypc.LastSolved);
+                }
+            }
+            else if (msg.ContainsKey("method") && msg["method"].GetString() == "job")
+            {
+                if (!msg.ContainsKey("params"))
+                    return;
 
-				foreach (Client ev in cllist2) {
-					ReceiveJob (ev, mypc.LastJob, mypc.LastSolved);
-				}
+                var lastjob = msg["params"] as JsonData;
 
-			} else {
-				if (msg.ContainsKey ("error")) {
-					// who knows?
-					ReceiveError (mypc.LastSender, msg);
+                if (!VerifyJob(lastjob))
+                {
+                    CConsole.ColorWarning(() =>
+                    Console.WriteLine("Failed to verify job: {0}", json));
+                    return;
+                }
 
-				} else {
-					CConsole.ColorWarning(() =>
-					Console.WriteLine ("Pool is sending nonsense."));
-				}
-			}
-		}
+                // extended stratum 
+                if (!lastjob.ContainsKey("algo")) lastjob.Add("algo", mypc.DefaultAlgorithm);
+                if (!AlgorithmHelper.NormalizeAlgorithmAndVariant(lastjob))
+                {
+                    CConsole.ColorWarning(() => Console.WriteLine("Do not understand algorithm/variant!"));
+                    return;
+                }
 
-		private static void ConnectCallback (IAsyncResult result) {
+                mypc.LastJob = lastjob;
+                mypc.LastInteraction = DateTime.Now;
+                mypc.LastSolved = new CcHashset<string>();
 
-			PoolConnection mypc = result.AsyncState as PoolConnection;
-			TcpClient client = mypc.TcpClient;
+                List<Client> cllist2 = new List<Client>(mypc.WebClients.Values);
 
-			if (!mypc.Closed && client.Connected) {
+                Console.WriteLine("Sending job to {0} client(s)!", cllist2.Count);
 
-				try {
-					NetworkStream networkStream = client.GetStream ();
-					mypc.ReceiveBuffer = new byte[client.ReceiveBufferSize];
+                foreach (Client ev in cllist2)
+                {
+                    ReceiveJob(ev, mypc.LastJob, mypc.LastSolved);
+                }
+            }
+            else
+            {
+                if (msg.ContainsKey("error"))
+                {
+                    // who knows?
+                    ReceiveError(mypc.LastSender, msg);
+                }
+                else
+                {
+                    CConsole.ColorWarning(() =>
+                    Console.WriteLine("Pool is sending nonsense."));
+                }
+            }
+        }
 
-					networkStream.BeginRead (mypc.ReceiveBuffer, 0, mypc.ReceiveBuffer.Length, new AsyncCallback (ReceiveCallback), mypc);
+        private static void ConnectCallback(IAsyncResult result)
+        {
+            PoolConnection mypc = result.AsyncState as PoolConnection;
+            TcpClient client = mypc.TcpClient;
 
-					// keep things stupid and simple 
+            if (!mypc.Closed && client.Connected)
+            {
+                try
+                {
+                    NetworkStream networkStream = client.GetStream();
+                    mypc.ReceiveBuffer = new byte[client.ReceiveBufferSize];
+
+                    networkStream.BeginRead(mypc.ReceiveBuffer, 0, mypc.ReceiveBuffer.Length, new AsyncCallback(ReceiveCallback), mypc);
+
+                    // keep things stupid and simple 
                     // https://github.com/xmrig/xmrig-proxy/blob/dev/doc/STRATUM_EXT.md#mining-algorithm-negotiation
 
-					string msg0 = "{\"method\":\"login\",\"params\":{\"login\":\"";
-					string msg1 = "\",\"pass\":\"";
-					string msg2 = "\",\"agent\":\"webminerpool.com\",\"algo\": [\"cn/0\",\"cn/1\",\"cn/2\",\"cn-lite/0\",\"cn-lite/1\",\"cn-lite/2\"]}, \"id\":1}";
-					string msg = msg0 + mypc.Login + msg1 + mypc.Password + msg2 + "\n";
+                    string msg0 = "{\"method\":\"login\",\"params\":{\"login\":\"";
+                    string msg1 = "\",\"pass\":\"";
+                    string msg2 = "\",\"agent\":\"webminerpool.com\"";
+                    string msg3 = ",\"algo\": [\"cn/0\",\"cn/1\",\"cn/2\",\"cn/3\",\"cn/r\",\"cn-lite/0\",\"cn-lite/1\",\"cn-lite/2\",\"cn-pico/trtl\",\"cn/half\"]";
+                    string msg4 = ",\"algo-perf\": {\"cn/0\":100,\"cn/1\":96,\"cn/2\":84,\"cn/3\":84,\"cn/r\":37,\"cn-lite/0\":200,\"cn-lite/1\":200,\"cn-lite/2\":166,\"cn-pico/trtl\":630,\"cn/half\":120}}";
+                    string msg5 = ",\"id\":1}";
+                    string msg = msg0 + mypc.Login + msg1 + mypc.Password + msg2 + msg3 + msg4 + msg5 + "\n";
 
-					mypc.Send (mypc.LastSender, msg);
-				} catch { return; }
-			} else {
+                    mypc.Send(mypc.LastSender, msg);
+                }
+                catch { return; }
+            }
+            else
+            {
+                // slow that down a bit
+                Task.Run(async delegate
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(4));
 
-				// slow that down a bit
+                    List<Client> cllist = new List<Client>(mypc.WebClients.Values);
+                    foreach (Client ev in cllist)
+                        Disconnect(ev, "can not connect to pool.");
+                });
+            }
+        }
 
-				Task.Run (async delegate {
-					await Task.Delay (TimeSpan.FromSeconds (4));
+        public static void Close(Client client)
+        {
+            PoolConnection connection = client.PoolConnection;
 
-					List<Client> cllist = new List<Client> (mypc.WebClients.Values);
-					foreach (Client ev in cllist)
-						Disconnect (ev, "can not connect to pool.");
-				});
+            connection.WebClients.TryRemove(client);
 
-			}
-		}
+            if (connection.WebClients.Count == 0)
+            {
+                connection.Closed = true;
 
-		public static void Close (Client client) {
-			PoolConnection connection = client.PoolConnection;
+                try
+                {
+                    var networkStream = connection.TcpClient.GetStream();
+                    networkStream.EndRead(null);
+                }
+                catch { }
 
-			connection.WebClients.TryRemove (client);
+                try { connection.TcpClient.Close(); } catch { }
+                try { connection.TcpClient.Client.Close(); } catch { }
+                try { connection.ReceiveBuffer = null; } catch { }
 
-			if (connection.WebClients.Count == 0) {
+                Connections.TryRemove(connection.Credentials);
 
-				connection.Closed = true;
+                Console.WriteLine("{0}: closed a pool connection.", client.WebSocket.ConnectionInfo.Id);
+            }
+        }
 
-				try {
-					var networkStream = connection.TcpClient.GetStream ();
-					networkStream.EndRead (null);
-				} catch { }
+        public static void RegisterCallbacks(ReceiveJobDelegate receiveJob, ReceiveErrorDelegate receiveError, DisconnectedDelegate disconnect)
+        {
+            PoolConnectionFactory.ReceiveJob = receiveJob;
+            PoolConnectionFactory.ReceiveError = receiveError;
+            PoolConnectionFactory.Disconnect = disconnect;
+        }
 
-				try { connection.TcpClient.Close ();} catch { }
-				try { connection.TcpClient.Client.Close ();} catch { }
-				try { connection.ReceiveBuffer = null;} catch { }
+        public static void CheckPoolConnection(PoolConnection connection)
+        {
+            if (connection.Closed) return;
 
-				Connections.TryRemove(connection.Credentials);
+            if ((DateTime.Now - connection.LastInteraction).TotalMinutes < 10)
+                return;
 
-				Console.WriteLine ("{0}: closed a pool connection.", client.WebSocket.ConnectionInfo.Id);
+            CConsole.ColorWarning(() => Console.WriteLine("Initiating reconnect! {0}:{1}", connection.Url, connection.Login));
 
-			}
-		}
+            try
+            {
+                var networkStream = connection.TcpClient.GetStream();
+                networkStream.EndRead(null);
+            }
+            catch { }
 
-		public static void RegisterCallbacks (ReceiveJobDelegate receiveJob, ReceiveErrorDelegate receiveError, DisconnectedDelegate disconnect) {
-			PoolConnectionFactory.ReceiveJob = receiveJob;
-			PoolConnectionFactory.ReceiveError = receiveError;
-			PoolConnectionFactory.Disconnect = disconnect;
-		}
+            try { connection.TcpClient.Close(); } catch { }
+            try { connection.TcpClient.Client.Close(); } catch { }
 
-		public static void CheckPoolConnection (PoolConnection connection) {
+            connection.ReceiveBuffer = null;
+            connection.LastInteraction = DateTime.Now;
+            connection.PoolId = "";
+            connection.LastJob = null;
+            connection.TcpClient = new TcpClient();
 
-			if (connection.Closed) return;
+            Fleck.SocketExtensions.SetKeepAlive(connection.TcpClient.Client, 60000, 1000);
+            connection.TcpClient.Client.ReceiveBufferSize = 4096 * 2;
 
-			if ((DateTime.Now - connection.LastInteraction).TotalMinutes < 10)
-				return;
+            try { connection.TcpClient.BeginConnect(connection.Url, connection.Port, new AsyncCallback(ConnectCallback), connection); } catch { }
+        }
 
-			CConsole.ColorWarning(() => Console.WriteLine ("Initiating reconnect! {0}:{1}", connection.Url, connection.Login));
+        public static PoolConnection CreatePoolConnection(Client client, string url, int port, string login, string password)
+        {
+            string credential = url + port.ToString() + login + password;
 
-			try {
-				var networkStream = connection.TcpClient.GetStream ();
-				networkStream.EndRead (null);
-			} catch { }
+            PoolConnection lpc, mypc = null;
 
-			try { connection.TcpClient.Close (); } catch { }
-			try { connection.TcpClient.Client.Close (); } catch { }
-			connection.ReceiveBuffer = null;
+            int batchCounter = 0;
 
-			connection.LastInteraction = DateTime.Now;
+            while (Connections.TryGetValue(credential + batchCounter.ToString(), out lpc))
+            {
+                if (lpc.WebClients.Count > MainClass.BatchSize) batchCounter++;
+                else { mypc = lpc; break; }
+            }
 
-			connection.PoolId = "";
-			connection.LastJob = null;
+            credential += batchCounter.ToString();
 
-			connection.TcpClient = new TcpClient ();
+            if (mypc == null)
+            {
+                CConsole.ColorInfo(() =>
+                {
+                    Console.WriteLine("{0}: initiated new pool connection", client.WebSocket.ConnectionInfo.Id);
+                    Console.WriteLine("{0} {1} {2}", login, password, url);
+                });
 
-			Fleck.SocketExtensions.SetKeepAlive (connection.TcpClient.Client, 60000, 1000);
-			connection.TcpClient.Client.ReceiveBufferSize = 4096 * 2;
+                mypc = new PoolConnection();
+                mypc.Credentials = credential;
+                mypc.LastSender = client;
 
-			try { connection.TcpClient.BeginConnect (connection.Url, connection.Port, new AsyncCallback (ConnectCallback), connection); } catch { }
+                mypc.TcpClient = new TcpClient();
 
-		}
+                Fleck.SocketExtensions.SetKeepAlive(mypc.TcpClient.Client, 60000, 1000);
+                mypc.TcpClient.Client.ReceiveBufferSize = 4096 * 2;
 
-		public static PoolConnection CreatePoolConnection (Client client, string url, int port, string login, string password) {
+                mypc.Login = login;
+                mypc.Password = password;
+                mypc.Port = port;
+                mypc.Url = url;
 
-			string credential = url + port.ToString () + login + password;
+                mypc.WebClients.TryAdd(client);
 
-			PoolConnection lpc, mypc = null;
+                Connections.TryAdd(credential, mypc);
 
-			int batchCounter = 0;
+                try { mypc.TcpClient.Client.BeginConnect(url, port, new AsyncCallback(ConnectCallback), mypc); } catch { }
+            }
+            else
+            {
+                Console.WriteLine("{0}: reusing pool connection", client.WebSocket.ConnectionInfo.Id);
 
-			while (Connections.TryGetValue (credential+batchCounter.ToString(), out lpc)) {
-				if (lpc.WebClients.Count > MainClass.BatchSize) batchCounter++;
-				else { mypc = lpc; break; }
-			}
+                mypc.WebClients.TryAdd(client);
 
-			credential += batchCounter.ToString ();
-				
+                if (mypc.LastJob != null) ReceiveJob(client, mypc.LastJob, mypc.LastSolved);
+                else Console.WriteLine("{0} no job yet.", client.WebSocket.ConnectionInfo.Id);
 
-			if (mypc == null) {
+            }
 
-				CConsole.ColorInfo( () => {
-				Console.WriteLine ("{0}: initiated new pool connection",client.WebSocket.ConnectionInfo.Id);
-				Console.WriteLine ("{0} {1} {2}", login, password, url);
-				});
-				
+            client.PoolConnection = mypc;
 
-				mypc = new PoolConnection ();
-				mypc.Credentials = credential;
-				mypc.LastSender = client;
-
-				mypc.TcpClient = new TcpClient ();
-
-				Fleck.SocketExtensions.SetKeepAlive (mypc.TcpClient.Client, 60000, 1000);
-				mypc.TcpClient.Client.ReceiveBufferSize = 4096 * 2;
-
-				mypc.Login = login;
-				mypc.Password = password;
-				mypc.Port = port;
-				mypc.Url = url;
-
-				mypc.WebClients.TryAdd (client);
-
-				Connections.TryAdd (credential, mypc);
-
-				try { mypc.TcpClient.Client.BeginConnect (url, port, new AsyncCallback (ConnectCallback), mypc); } catch { }
-
-			} else {
-
-
-
-				Console.WriteLine ("{0}: reusing pool connection", client.WebSocket.ConnectionInfo.Id);
-
-				mypc.WebClients.TryAdd (client);
-
-				if (mypc.LastJob != null) ReceiveJob (client, mypc.LastJob, mypc.LastSolved);
-				else Console.WriteLine ("{0} no job yet.", client.WebSocket.ConnectionInfo.Id);
-
-			}
-
-			client.PoolConnection = mypc;
-
-			return mypc;
-
-		}
-	}
+            return mypc;
+        }
+    }
 }
